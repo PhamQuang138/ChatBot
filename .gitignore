@@ -1,0 +1,4 @@
+# Ẩn folder môi trường và folder cấu hình Pycharm
+.venv/
+.idea/
+
