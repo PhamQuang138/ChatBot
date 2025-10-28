@@ -1,0 +1,1 @@
+# Sản phẩm cuối cùng của quá trình tiền xử lý (Input cho Vector DB)
