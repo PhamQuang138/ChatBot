@@ -1,0 +1,2 @@
+# scripts, 2 dua m chi chay file gradio thoi nhe, 2 file kia la train dung dong vao k chay duoc dau
+# khong xoa hay dong vao chromadb_qwen_embed day la file chua du lieu t da train
