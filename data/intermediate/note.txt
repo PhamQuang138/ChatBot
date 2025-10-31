@@ -1,1 +1,2 @@
 # Kết quả của các bước làm sạch và xử lý trung gian
+#tool xu li file raw
