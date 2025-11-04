@@ -16,16 +16,17 @@ from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFacePipeline
 from langchain_core.embeddings import Embeddings
 from langchain_core.prompts import ChatPromptTemplate
+from rank_bm25 import BM25Okapi
 
 
 # ================== CONFIG ==================
 BASE_DIR = "/home/quang/Documents/ChatBot"
 CHROMA_PATH = os.path.join(BASE_DIR, "data", "chroma_db_qwen_embed_vn")
-LLM_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+LLM_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"        # ✅ Đã thay 3B
 EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-TOP_K = 10
-THRESHOLD = 0.01
+TOP_K = 20
+THRESHOLD = 0.005
 BATCH_SIZE = 4
 # ===========================================
 
@@ -82,7 +83,6 @@ embed_model = None
 embed_tokenizer = None
 embedding_fn = None
 
-# ===== Initialization =====
 def initialize_rag_components():
     global vectordb, retriever, llm, prompt_template, embed_model, embed_tokenizer, embedding_fn
 
@@ -111,66 +111,88 @@ def initialize_rag_components():
     retriever = vectordb.as_retriever(search_kwargs={"k": TOP_K})
     print("✅ Chroma retriever ready.")
 
-    # 3️⃣ Load LLM (Qwen Instruct — dùng pipeline trực tiếp)
-    print(f"🔹 Loading LLM {LLM_MODEL} (8-bit)...")
-    bnb_config = BitsAndBytesConfig(load_in_8bit=True)
+    # 3️⃣ Load LLM
+    print(f"🔹 Loading LLM {LLM_MODEL} (4-bit)...")
+    bnb_config = BitsAndBytesConfig(load_in_4bit=True)
+
     tokenizer_llm = AutoTokenizer.from_pretrained(LLM_MODEL)
     model_llm = AutoModelForCausalLM.from_pretrained(
         LLM_MODEL,
         device_map="auto",
         torch_dtype=torch.float16,
-        quantization_config=bnb_config
+        quantization_config=bnb_config,
+        low_cpu_mem_usage=True
     )
+
+    # ⚡ Load LoRA adapter (nếu có)
+    lora_path = os.path.join(BASE_DIR, "src", "lora_qwen_druglaw_4bit")
+    if os.path.exists(lora_path):
+        try:
+            from peft import PeftModel
+            print(f"🔹 Attaching LoRA adapter from {lora_path}")
+            model_llm = PeftModel.from_pretrained(model_llm, lora_path)
+            print("✅ LoRA adapter loaded successfully!")
+        except Exception as e:
+            print(f"⚠️ Warning: Không thể load LoRA adapter: {e}")
+    else:
+        print(f"⚠️ Không tìm thấy thư mục LoRA tại {lora_path}")
 
     llm = pipeline(
         "text-generation",
         model=model_llm,
         tokenizer=tokenizer_llm,
-        max_new_tokens=2048,
-        max_length=4096,# cho phép sinh dài hơn
-        truncation=False,  # không cắt context
-        do_sample=False,
         return_full_text=False
     )
 
     print("✅ LLM ready.")
 
-    # 4️⃣ Prompt Template (phiên bản cực nghiêm ngặt)
-    prompt_template = ChatPromptTemplate.from_template(
-        """Bạn là **trợ lý pháp lý chuyên về Luật Dược Việt Nam**.
+prompt_template_normal = ChatPromptTemplate.from_template(
+        """Bạn là trợ lý pháp lý chuyên về **Luật Dược Việt Nam**.
 
-    Dựa **chỉ trên nội dung điều luật trong CONTEXT** dưới đây để trả lời câu hỏi.
-    Nếu **không có thông tin phù hợp**, trả lời đúng câu này:
-    "Không tìm thấy thông tin này trong các điều luật được cung cấp."
+    Dựa **chỉ trên phần CONTEXT dưới đây**, hãy **trích nguyên văn quy định pháp luật** có liên quan để trả lời câu hỏi.
+    Không được:
+    - thêm bình luận, suy luận, hay diễn giải.
+    - liệt kê các lựa chọn kiểu a), b), c) nếu câu hỏi không yêu cầu.
+    - tự đánh giá hay chọn đáp án.
 
     ---
-    ### CONTEXT
+    📘 CONTEXT:
     {context}
 
-    ### CÂU HỎI
+    💬 CÂU HỎI:
     {question}
 
-    ### TRẢ LỜI (ngắn gọn, chính xác, trích từ điều luật trên,không lặp nguyên văn,
-    Trình bày đầy đủ tất cả, giữ nguyên ký hiệu của điều luật (ví dụ: a), b), c), d), đ) ...), không được thay đổi,Không thêm phần giải thích, không tóm tắt, không bình luận,
-    Nếu câu hỏi chỉ hỏi một phần (ví dụ “hoạt động kinh doanh dược gồm những gì”), vẫn giữ nguyên cấu trúc đầy đủ của điều luật liên quan.  ),
-
-
+    ✍️ TRẢ LỜI (trích nguyên văn quy định):
     """
-
     )
 
-    print("✅ All components initialized.\n")
+prompt_template_quiz = ChatPromptTemplate.from_template(
+        """Bạn là trợ lý pháp lý chuyên về **Luật Dược Việt Nam**.
 
+    Câu hỏi sau đây có dạng **trắc nghiệm nhiều lựa chọn** (a, b, c, d...).
+    "Chỉ trả lời các mục a) tới h) đã cho, KHÔNG sinh thêm nhãn hay A:, B:, C: trống."
+    Dựa **chỉ trên phần CONTEXT**, hãy:
+    - trích nguyên văn quy định liên quan, 
+    - sau đó **chỉ ra đáp án đúng duy nhất**, không thêm giải thích hay bình luận.
 
-from rank_bm25 import BM25Okapi
+    ---
+    📘 CONTEXT:
+    {context}
 
+    💬 CÂU HỎI (trắc nghiệm):
+    {question}
 
+    ✍️ TRẢ LỜI (nguyên văn + chọn đáp án đúng):
+    """
+    )
+
+print("✅ All components initialized.\n")
 
 def rag_query(question: str, use_llm: bool = True):
     if not vectordb or not llm:
         return "⚠️ RAG chưa được khởi tạo đúng cách.", ""
 
-    # === 1️⃣ Xử lý câu hỏi dạng "Điều X" ===
+    # --- 1️⃣ Nếu người dùng hỏi theo "Điều X"
     match = re.search(r"Điều\s*(\d+)", question.strip(), re.IGNORECASE)
     if match:
         article_num = match.group(1).strip()
@@ -187,14 +209,13 @@ def rag_query(question: str, use_llm: bool = True):
             return "Không tìm thấy thông tin này trong các điều luật.", f"Điều {article_num} (không thấy trong DB)"
 
         context = "\n---\n".join(found_docs)
-        # Nếu tắt LLM thì chỉ in context
         if not use_llm:
-            print(f"\n📚 CONTEXT (Điều {article_num}):\n", context[:2000], "\n====================\n")
             return context, f"Điều {article_num} (tìm thấy {len(found_docs)} đoạn)"
-        # Ngược lại thì tiếp tục gọi LLM
-        question = f"Nội dung của Điều {article_num} là gì?"
 
-    # === 2️⃣ Hybrid Search: BM25 + Embedding ===
+        # Giữ câu hỏi tự nhiên, không ép prompt nữa
+        question = f"Nội dung quy định tại Điều {article_num} là gì?"
+
+    # --- 2️⃣ Hybrid Search (BM25 + Semantic)
     all_data = vectordb._collection.get(include=["documents", "metadatas"], limit=10000)
     documents = all_data.get("documents", [])
     metadatas = all_data.get("metadatas", [])
@@ -228,63 +249,66 @@ def rag_query(question: str, use_llm: bool = True):
     if not merged:
         return "⚠️ Không tìm thấy điều luật liên quan.", ""
 
+    # --- 3️⃣ Chọn điều có điểm cao nhất
     merged.sort(key=lambda x: x[0], reverse=True)
     best_score, _, best_art = merged[0]
     same_articles = [doc for score, doc, art in merged if art == best_art]
-    combined_content = "\n".join(same_articles)
 
-    lines = [l.strip() for l in combined_content.splitlines() if l.strip()]
-    unique_lines, seen_lines = [], set()
-    for l in lines:
-        if l not in seen_lines:
-            unique_lines.append(l)
-            seen_lines.add(l)
-    cleaned_content = "\n".join(unique_lines)
-
+    cleaned_content = "\n".join(dict.fromkeys("\n".join(same_articles).splitlines()))
     context = f"{best_art}\n{cleaned_content.strip()}"
-    if len(context.split()) > 2000:
-        context = " ".join(context.split()[:2000])
-    sources = [f"{best_art} (score={best_score:.2f})"]
+    if len(context.split()) > 4000:
+        context = " ".join(context.split()[:4000])
 
-    if best_score < 5:
-        return "Không tìm thấy điều luật phù hợp.", ""
-
-    # --- ⚙️ Nếu tắt LLM thì chỉ hiển thị context ---
     if not use_llm:
-        print("\n🧩 CONTEXT TRUY XUẤT ĐƯỢC:\n", context[:2000], "\n====================\n")
-        return context, "\n".join(sources)
+        return context, f"{best_art} (score={best_score:.2f})"
 
-    # --- 🧠 Nếu bật LLM ---
-    prompt = prompt_template.format(context=context, question=question)
-    print("\n🧩 PROMPT GỬI LÊN LLM:\n", prompt[:1000], "\n====================\n")
+    # --- 4️⃣ Tạo prompt phù hợp ---
+    if re.search(r"\b[a-e]\)", question.lower()):
+        prompt_text = prompt_template_quiz.format(context=context, question=question)
+    else:
+        prompt_text = prompt_template_normal.format(context=context, question=question)
 
     try:
-        result = llm(prompt, max_new_tokens=512)
-        answer = result[0]["generated_text"].strip() if isinstance(result, list) else str(result).strip()
+        result = llm(prompt_text,max_new_tokens=512,do_sample=True,temperature=0.1,top_p=0.8)
+        answer = result[0]["generated_text"].strip()
+        answer = re.sub(r'(?i)assistant[:：-]*\s*', '', answer).strip()
+        # ❌ Cắt phần "Explanation" hoặc "Giải thích" nếu có
+        answer = re.split(r"(###?\s*Explanation:|Giải thích[:：])", answer, flags=re.IGNORECASE)[0].strip()
+
+        # ❌ Cắt phần "Answer:" nếu có tiêu đề
+        answer = re.sub(r"^###?\s*Answer:\s*", "", answer, flags=re.IGNORECASE).strip()
+
+        # ❌ Loại bỏ tiêu đề "Trả lời" hoặc phần lặp lại
+        answer = re.sub(r"(?i)(###?\s*trả lời[:：]*\s*)", "", answer).strip()
+
+        # ✅ Cắt bỏ phần trùng lặp nếu mô hình lặp nội dung nhiều lần
+        lines = [line.strip() for line in answer.splitlines() if line.strip()]
+        unique_lines = []
+        for line in lines:
+            if line not in unique_lines:
+                unique_lines.append(line)
+
+        # ✅ Giữ lại tối đa 1 đoạn nội dung trùng lặp (tránh 5–6 lần lặp y hệt)
+        answer = "\n".join(unique_lines)
+
+        # ✅ Nếu mô hình tự sinh nhiều khối “---”, cắt phần đầu tiên
+        answer = answer.split('---')[0].strip()
+
+        # ✅ Nếu mô hình lặp lại toàn bộ block nhiều lần, cắt phần lặp dựa trên dòng đầu tiên
+        if answer.count(unique_lines[0]) > 1:
+            first = answer.find(unique_lines[0])
+            second = answer.find(unique_lines[0], first + len(unique_lines[0]))
+            if second != -1:
+                answer = answer[:second].strip()
+
     except Exception as e:
         answer = f"Lỗi khi sinh câu trả lời: {e}"
 
-    # Làm sạch text
-    answer = re.sub(r'(?i)\bassistant\s*[:：-]*\s*', '', answer)
-    answer = re.sub(r'(?i)assistant\s+nói\s+rằng[:：-]*\s*', '', answer)
-    answer = re.sub(r'^[\s\n]+|[\s\n]+$', '', answer)
-    answer = re.sub(r'\n{2,}', '\n', answer)
-    answer = re.sub(r'([a-z]\))', r'\n\1', answer)
-    answer = re.sub(r'(\d+\.)', r'\n\1', answer)
-    answer = re.sub(r'(\n\s*)+', '\n', answer).strip()
-
-    lines = [l.strip() for l in answer.splitlines() if l.strip()]
-    deduped, seen = [], set()
-    for l in lines:
-        if l not in seen:
-            deduped.append(l)
-            seen.add(l)
-    answer = "\n".join(deduped).strip()
-
+    # Nếu LLM không trích được — trả context để debug
     if not answer or "không tìm thấy" in answer.lower():
-        answer = "Không tìm thấy thông tin này trong các điều luật được cung cấp."
+        return context, f"[DEBUG: LLM không trích được] {best_art} (score={best_score:.2f})"
 
-    return answer, "\n".join(sources)
+    return answer, f"{best_art} (score={best_score:.2f})"
 
 try:
     initialize_rag_components()
@@ -293,7 +317,7 @@ except Exception as e:
 
 
 # ======= Gradio UI =======
-with gr.Blocks(title="⚖️ Trợ lý pháp lý Luật Dược Việt Nam (Qwen RAG)") as demo:
+with gr.Blocks(title="⚖️ Trợ lý pháp lý Luật Dược Việt Nam (Qwen 3B RAG)") as demo:
     gr.Markdown(f"""
     ## ⚖️ Trợ lý pháp lý Luật Dược Việt Nam
     **LLM:** `{LLM_MODEL}`  
@@ -306,7 +330,6 @@ with gr.Blocks(title="⚖️ Trợ lý pháp lý Luật Dược Việt Nam (Qwen
             question = gr.Textbox(label="Nhập câu hỏi pháp lý:", lines=3,
                                   placeholder="Ví dụ: Điều 47 quy định gì về thuốc generic?")
             use_llm = gr.Checkbox(label="Gọi LLM (bật để sinh câu trả lời)", value=True)
-
             ask = gr.Button("Hỏi", variant="primary")
             clear = gr.Button("Xoá")
         with gr.Column(scale=3):
@@ -314,7 +337,6 @@ with gr.Blocks(title="⚖️ Trợ lý pháp lý Luật Dược Việt Nam (Qwen
             source_box = gr.Textbox(label="Điều luật trích dẫn", lines=6, interactive=False)
 
     ask.click(fn=rag_query, inputs=[question, use_llm], outputs=[answer_box, source_box])
-
     clear.click(lambda: ("", "", ""), outputs=[question, answer_box, source_box])
 
 if __name__ == "__main__":
