@@ -18,18 +18,28 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.prompts import ChatPromptTemplate
 from rank_bm25 import BM25Okapi
 
-
 # ================== CONFIG ==================
 BASE_DIR = "/home/quang/Documents/ChatBot"
 CHROMA_PATH = os.path.join(BASE_DIR, "data", "chroma_db_qwen_embed_vn")
-LLM_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"        # ✅ Đã thay 3B
-EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+LLM_MODEL = "meta-llama/Llama-3.2-1B"      # ✅ model base đúng của LoRA fine-tuned
+EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"  # vẫn có thể dùng Qwen3 embed
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TOP_K = 20
 THRESHOLD = 0.005
 BATCH_SIZE = 4
-# ===========================================
 
+import difflib
+
+def remove_near_duplicates(lines, similarity=0.9):
+    cleaned = []
+    for line in lines:
+        if not cleaned:
+            cleaned.append(line)
+            continue
+        sim = difflib.SequenceMatcher(None, cleaned[-1], line).ratio()
+        if sim < similarity:
+            cleaned.append(line)
+    return cleaned
 
 # ===== Embedding wrapper =====
 class Qwen3Embedding(Embeddings):
@@ -111,9 +121,13 @@ def initialize_rag_components():
     retriever = vectordb.as_retriever(search_kwargs={"k": TOP_K})
     print("✅ Chroma retriever ready.")
 
-    # 3️⃣ Load LLM
-    print(f"🔹 Loading LLM {LLM_MODEL} (4-bit)...")
-    bnb_config = BitsAndBytesConfig(load_in_4bit=True)
+    # 3️⃣ Load LLM (base Llama + LoRA)
+    print(f"🔹 Loading base LLM: {LLM_MODEL} (4-bit)...")
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.float16
+    )
 
     tokenizer_llm = AutoTokenizer.from_pretrained(LLM_MODEL)
     model_llm = AutoModelForCausalLM.from_pretrained(
@@ -124,8 +138,8 @@ def initialize_rag_components():
         low_cpu_mem_usage=True
     )
 
-    # ⚡ Load LoRA adapter (nếu có)
-    lora_path = os.path.join(BASE_DIR, "src", "lora_qwen_druglaw_4bit")
+    # ⚡ Load LoRA adapter
+    lora_path = os.path.join(BASE_DIR, "src", "lora_llama3_4bit")
     if os.path.exists(lora_path):
         try:
             from peft import PeftModel
@@ -141,58 +155,70 @@ def initialize_rag_components():
         "text-generation",
         model=model_llm,
         tokenizer=tokenizer_llm,
-        return_full_text=False
+        return_full_text=False,
+        no_repeat_ngram_size=6
     )
 
     print("✅ LLM ready.")
 
+
 prompt_template_normal = ChatPromptTemplate.from_template(
-        """Bạn là trợ lý pháp lý chuyên về **Luật Dược Việt Nam**.
+    """Bạn là trợ lý pháp lý chuyên về **Luật Dược Việt Nam**.
 
-    Dựa **chỉ trên phần CONTEXT dưới đây**, hãy **trích nguyên văn quy định pháp luật** có liên quan để trả lời câu hỏi.
-    Không được:
-    - thêm bình luận, suy luận, hay diễn giải.
-    - liệt kê các lựa chọn kiểu a), b), c) nếu câu hỏi không yêu cầu.
-    - tự đánh giá hay chọn đáp án.
+Dựa **chỉ trên phần CONTEXT dưới đây**, hãy **trích nguyên văn quy định pháp luật** có liên quan để trả lời câu hỏi.
+- Nếu trong phần CONTEXT có các câu đánh số (1, 2, 3...) hoặc a),b),c),...hãy trình bày xuống dòng rõ ràng.
 
-    ---
-    📘 CONTEXT:
-    {context}
+Tuyệt đối **không được suy luận, diễn giải, hoặc paraphrase**.
 
-    💬 CÂU HỎI:
-    {question}
+- Nếu không có nội dung nào trong CONTEXT trùng khớp hoặc trích dẫn nguyên văn điều luật, **dù có các câu tương tự hoặc diễn giải**, thì phải trả đúng duy nhất:
+  "Không tìm thấy quy định liên quan trong CONTEXT."
 
-    ✍️ TRẢ LỜI (trích nguyên văn quy định):
-    """
-    )
+- Nếu có nhiều đoạn giống nhau hoặc trùng lặp, chỉ giữ lại **một bản đầy đủ nhất**.
+
+---
+📑 CONTEXT:
+{context}
+
+💬 CÂU HỎI:
+{question}
+
+✍️ TRẢ LỜI (trích nguyên văn quy định hoặc câu thông báo trên):
+"""
+)
+
 
 prompt_template_quiz = ChatPromptTemplate.from_template(
-        """Bạn là trợ lý pháp lý chuyên về **Luật Dược Việt Nam**.
+    """Bạn là trợ lý pháp lý chuyên về **Luật Dược Việt Nam**.
 
-    Câu hỏi sau đây có dạng **trắc nghiệm nhiều lựa chọn** (a, b, c, d...).
-    "Chỉ trả lời các mục a) tới h) đã cho, KHÔNG sinh thêm nhãn hay A:, B:, C: trống."
-    Dựa **chỉ trên phần CONTEXT**, hãy:
-    - trích nguyên văn quy định liên quan, 
-    - sau đó **chỉ ra đáp án đúng duy nhất**, không thêm giải thích hay bình luận.
+Câu hỏi sau đây có dạng **trắc nghiệm nhiều lựa chọn** (a, b, c, d...).
+Dựa **chỉ trên phần CONTEXT**, hãy:
+- trích nguyên văn quy định liên quan,
+- không thêm giải thích hay bình luận.
+- Nếu trong phần CONTEXT có các câu đánh số (1, 2, 3...) hoặc a),b),c),...hãy trình bày xuống dòng rõ ràng.
 
-    ---
-    📘 CONTEXT:
-    {context}
 
-    💬 CÂU HỎI (trắc nghiệm):
-    {question}
+Không được:
+- Tự tạo nội dung, URL, hay số liệu.
+- Dịch sang ngôn ngữ khác.
+- Thêm bình luận, giải thích hay suy luận.
 
-    ✍️ TRẢ LỜI (nguyên văn + chọn đáp án đúng):
-    """
-    )
+---
+📘 CONTEXT:
+{context}
+
+💬 CÂU HỎI (trắc nghiệm):
+{question}
+
+✍️ TRẢ LỜI (nguyên văn + chọn đáp án đúng):
+"""
+)
 
 print("✅ All components initialized.\n")
 
+# ============= RAG QUERY =============
 def rag_query(question: str, use_llm: bool = True):
     if not vectordb or not llm:
         return "⚠️ RAG chưa được khởi tạo đúng cách.", ""
-
-    # --- 1️⃣ Nếu người dùng hỏi theo "Điều X"
     match = re.search(r"Điều\s*(\d+)", question.strip(), re.IGNORECASE)
     if match:
         article_num = match.group(1).strip()
@@ -211,11 +237,9 @@ def rag_query(question: str, use_llm: bool = True):
         context = "\n---\n".join(found_docs)
         if not use_llm:
             return context, f"Điều {article_num} (tìm thấy {len(found_docs)} đoạn)"
-
-        # Giữ câu hỏi tự nhiên, không ép prompt nữa
         question = f"Nội dung quy định tại Điều {article_num} là gì?"
 
-    # --- 2️⃣ Hybrid Search (BM25 + Semantic)
+    # 2️⃣ Hybrid Search
     all_data = vectordb._collection.get(include=["documents", "metadatas"], limit=10000)
     documents = all_data.get("documents", [])
     metadatas = all_data.get("metadatas", [])
@@ -229,8 +253,8 @@ def rag_query(question: str, use_llm: bool = True):
     bm25_docs = [(bm25_scores[i], documents[i], metadatas[i]) for i in top_bm25_idx if bm25_scores[i] > 0]
 
     sem_docs = retriever.invoke(question)
-
     merged, seen = [], set()
+
     for score, doc, meta in bm25_docs:
         art = meta.get("article", "Không rõ") if isinstance(meta, dict) else "Không rõ"
         if doc not in seen:
@@ -249,75 +273,44 @@ def rag_query(question: str, use_llm: bool = True):
     if not merged:
         return "⚠️ Không tìm thấy điều luật liên quan.", ""
 
-    # --- 3️⃣ Chọn điều có điểm cao nhất
     merged.sort(key=lambda x: x[0], reverse=True)
     best_score, _, best_art = merged[0]
     same_articles = [doc for score, doc, art in merged if art == best_art]
+    context = f"{best_art}\n" + "\n".join(same_articles).strip()
 
-    cleaned_content = "\n".join(dict.fromkeys("\n".join(same_articles).splitlines()))
-    context = f"{best_art}\n{cleaned_content.strip()}"
     if len(context.split()) > 4000:
         context = " ".join(context.split()[:4000])
 
     if not use_llm:
         return context, f"{best_art} (score={best_score:.2f})"
 
-    # --- 4️⃣ Tạo prompt phù hợp ---
-    if re.search(r"\b[a-e]\)", question.lower()):
-        prompt_text = prompt_template_quiz.format(context=context, question=question)
-    else:
-        prompt_text = prompt_template_normal.format(context=context, question=question)
+    prompt_text = (
+        prompt_template_quiz.format(context=context, question=question)
+        if re.search(r"\b[a-e]\)", question.lower())
+        else prompt_template_normal.format(context=context, question=question)
+    )
 
     try:
-        result = llm(prompt_text,max_new_tokens=512,do_sample=True,temperature=0.1,top_p=0.8)
+        result = llm(prompt_text,max_new_tokens = 512)
         answer = result[0]["generated_text"].strip()
-        answer = re.sub(r'(?i)assistant[:：-]*\s*', '', answer).strip()
-        # ❌ Cắt phần "Explanation" hoặc "Giải thích" nếu có
-        answer = re.split(r"(###?\s*Explanation:|Giải thích[:：])", answer, flags=re.IGNORECASE)[0].strip()
 
-        # ❌ Cắt phần "Answer:" nếu có tiêu đề
-        answer = re.sub(r"^###?\s*Answer:\s*", "", answer, flags=re.IGNORECASE).strip()
 
-        # ❌ Loại bỏ tiêu đề "Trả lời" hoặc phần lặp lại
-        answer = re.sub(r"(?i)(###?\s*trả lời[:：]*\s*)", "", answer).strip()
-
-        # ✅ Cắt bỏ phần trùng lặp nếu mô hình lặp nội dung nhiều lần
         lines = [line.strip() for line in answer.splitlines() if line.strip()]
-        unique_lines = []
-        for line in lines:
-            if line not in unique_lines:
-                unique_lines.append(line)
-
-        # ✅ Giữ lại tối đa 1 đoạn nội dung trùng lặp (tránh 5–6 lần lặp y hệt)
-        answer = "\n".join(unique_lines)
-
-        # ✅ Nếu mô hình tự sinh nhiều khối “---”, cắt phần đầu tiên
-        answer = answer.split('---')[0].strip()
-
-        # ✅ Nếu mô hình lặp lại toàn bộ block nhiều lần, cắt phần lặp dựa trên dòng đầu tiên
-        if answer.count(unique_lines[0]) > 1:
-            first = answer.find(unique_lines[0])
-            second = answer.find(unique_lines[0], first + len(unique_lines[0]))
-            if second != -1:
-                answer = answer[:second].strip()
+        unique_lines = remove_near_duplicates(lines, similarity=0.9)
+        answer = " ".join(unique_lines)
 
     except Exception as e:
         answer = f"Lỗi khi sinh câu trả lời: {e}"
-
-    # Nếu LLM không trích được — trả context để debug
-    if not answer or "không tìm thấy" in answer.lower():
-        return context, f"[DEBUG: LLM không trích được] {best_art} (score={best_score:.2f})"
-
     return answer, f"{best_art} (score={best_score:.2f})"
 
+
+# ======= Gradio UI =======
 try:
     initialize_rag_components()
 except Exception as e:
     print(f"❌ LỖI KHỞI TẠO NGHIÊM TRỌNG: {e}")
 
-
-# ======= Gradio UI =======
-with gr.Blocks(title="⚖️ Trợ lý pháp lý Luật Dược Việt Nam (Qwen 3B RAG)") as demo:
+with gr.Blocks(title="⚖️ Trợ lý pháp lý Luật Dược Việt Nam (Llama 1B LoRA)") as demo:
     gr.Markdown(f"""
     ## ⚖️ Trợ lý pháp lý Luật Dược Việt Nam
     **LLM:** `{LLM_MODEL}`  

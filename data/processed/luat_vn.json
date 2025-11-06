@@ -1,4 +1,5 @@
-
+{
+  "conversations": [
     {
       "from": "user",
       "value": "Các loại thuốc và nguyên liệu làm thuốc nào được phép lưu hành hợp pháp trên thị trường?"
@@ -2279,3 +2280,5 @@
     "from": "assistant",
     "value": "Luật Dược số 34/2005/QH11 hết hiệu lực kể từ ngày Luật này có hiệu lực thi hành, tức là từ ngày 01 tháng 01 năm 2017."
   }
+  ]
+}

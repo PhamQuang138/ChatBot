@@ -1,28 +1,42 @@
 import json
-import re
 
-# === ĐƯỜNG DẪN FILE JSON ===
-INPUT_FILE = "QA_split.json"
-OUTPUT_FILE = "conversations_clean.json"
+INPUT_FILE = "luat_vn (1).json"
+OUTPUT_FILE = "luat_vn_split.json"
 
-def remove_asterisks_from_list_json(input_file, output_file):
+def split_conversations(input_file, output_file):
     with open(input_file, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    if not isinstance(data, list):
-        print("❌ File JSON không phải dạng list. Hãy kiểm tra lại.")
+    new_data = []
+
+    # Trường hợp file là list các hội thoại lớn
+    if isinstance(data, list):
+        for item in data:
+            convos = item.get("conversations", [])
+            # Duyệt từng cặp user–assistant
+            for i in range(0, len(convos) - 1, 2):
+                if convos[i]["from"] == "user" and convos[i + 1]["from"] == "assistant":
+                    new_data.append({
+                        "conversations": [convos[i], convos[i + 1]]
+                    })
+
+    # Trường hợp file là 1 object chứa key "conversations"
+    elif isinstance(data, dict) and "conversations" in data:
+        convos = data["conversations"]
+        for i in range(0, len(convos) - 1, 2):
+            if convos[i]["from"] == "user" and convos[i + 1]["from"] == "assistant":
+                new_data.append({
+                    "conversations": [convos[i], convos[i + 1]]
+                })
+
+    else:
+        print("❌ File không có cấu trúc hợp lệ (không tìm thấy 'conversations').")
         return
 
-    for item in data:
-        if "conversations" in item and isinstance(item["conversations"], list):
-            for convo in item["conversations"]:
-                if "value" in convo and isinstance(convo["value"], str):
-                    convo["value"] = re.sub(r"\*\*", "", convo["value"])
-
     with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(new_data, f, ensure_ascii=False, indent=2)
 
-    print(f"✅ Đã xoá ** trong tất cả các hội thoại và lưu vào: {output_file}")
+    print(f"✅ Đã tách thành {len(new_data)} đoạn hội thoại và lưu vào: {output_file}")
 
-# === CHẠY ===
-remove_asterisks_from_list_json(INPUT_FILE, OUTPUT_FILE)
+if __name__ == "__main__":
+    split_conversations(INPUT_FILE, OUTPUT_FILE)
