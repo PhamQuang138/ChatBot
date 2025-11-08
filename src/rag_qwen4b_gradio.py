@@ -219,6 +219,8 @@ print("✅ All components initialized.\n")
 def rag_query(question: str, use_llm: bool = True):
     if not vectordb or not llm:
         return "⚠️ RAG chưa được khởi tạo đúng cách.", ""
+
+    # === 1️⃣ Nếu câu hỏi có chứa 'Điều X' → chỉ truy xuất dữ liệu, không gọi LLM ===
     match = re.search(r"Điều\s*(\d+)", question.strip(), re.IGNORECASE)
     if match:
         article_num = match.group(1).strip()
@@ -235,11 +237,18 @@ def rag_query(question: str, use_llm: bool = True):
             return "Không tìm thấy thông tin này trong các điều luật.", f"Điều {article_num} (không thấy trong DB)"
 
         context = "\n---\n".join(found_docs)
+
+        # 🚫 Tự động bỏ qua LLM nếu câu hỏi chỉ dạng 'Điều X' hoặc tương tự
+        if re.fullmatch(r".*Điều\s*\d+.*", question.strip(), re.IGNORECASE):
+            return context, f"Điều {article_num} (tìm thấy {len(found_docs)} đoạn)"
+
+        # Nếu câu hỏi dài hoặc có thêm nội dung → vẫn có thể gọi LLM
         if not use_llm:
             return context, f"Điều {article_num} (tìm thấy {len(found_docs)} đoạn)"
+
         question = f"Nội dung quy định tại Điều {article_num} là gì?"
 
-    # 2️⃣ Hybrid Search
+    # === 2️⃣ Hybrid Search (BM25 + Embedding) ===
     all_data = vectordb._collection.get(include=["documents", "metadatas"], limit=10000)
     documents = all_data.get("documents", [])
     metadatas = all_data.get("metadatas", [])
@@ -281,9 +290,11 @@ def rag_query(question: str, use_llm: bool = True):
     if len(context.split()) > 4000:
         context = " ".join(context.split()[:4000])
 
+    # Nếu không muốn gọi LLM thì trả lại luôn context
     if not use_llm:
         return context, f"{best_art} (score={best_score:.2f})"
 
+    # === 3️⃣ Gọi LLM nếu cần ===
     prompt_text = (
         prompt_template_quiz.format(context=context, question=question)
         if re.search(r"\b[a-e]\)", question.lower())
@@ -291,9 +302,8 @@ def rag_query(question: str, use_llm: bool = True):
     )
 
     try:
-        result = llm(prompt_text,max_new_tokens = 512)
+        result = llm(prompt_text, max_new_tokens=512)
         answer = result[0]["generated_text"].strip()
-
 
         lines = [line.strip() for line in answer.splitlines() if line.strip()]
         unique_lines = remove_near_duplicates(lines, similarity=0.9)
@@ -301,6 +311,7 @@ def rag_query(question: str, use_llm: bool = True):
 
     except Exception as e:
         answer = f"Lỗi khi sinh câu trả lời: {e}"
+
     return answer, f"{best_art} (score={best_score:.2f})"
 
 
