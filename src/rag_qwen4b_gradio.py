@@ -21,7 +21,7 @@ from rank_bm25 import BM25Okapi
 # ================== CONFIG ==================
 BASE_DIR = "/home/quang/Documents/ChatBot"
 CHROMA_PATH = os.path.join(BASE_DIR, "data", "chroma_db_qwen_embed_vn")
-LLM_MODEL = "meta-llama/Llama-3.2-1B"      # ✅ model base đúng của LoRA fine-tuned
+LLM_MODEL = "meta-llama/Llama-3.2-1B"  # model base đúng của LoRA fine-tuned
 EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"  # vẫn có thể dùng Qwen3 embed
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TOP_K = 20
@@ -30,14 +30,21 @@ BATCH_SIZE = 4
 
 import difflib
 
+
 def remove_near_duplicates(lines, similarity=0.9):
     cleaned = []
     for line in lines:
-        if not cleaned:
-            cleaned.append(line)
+        if not line: # Bỏ qua dòng trống
             continue
-        sim = difflib.SequenceMatcher(None, cleaned[-1], line).ratio()
-        if sim < similarity:
+        is_duplicate = False
+        # So sánh dòng hiện tại với TẤT CẢ các dòng đã được thêm
+        for existing_line in cleaned:
+            sim = difflib.SequenceMatcher(None, existing_line, line).ratio()
+            if sim >= similarity:
+                is_duplicate = True
+                break # Dòng này lặp, bỏ qua
+
+        if not is_duplicate:
             cleaned.append(line)
     return cleaned
 
@@ -92,6 +99,7 @@ prompt_template = None
 embed_model = None
 embed_tokenizer = None
 embedding_fn = None
+
 
 def initialize_rag_components():
     global vectordb, retriever, llm, prompt_template, embed_model, embed_tokenizer, embedding_fn
@@ -167,11 +175,9 @@ prompt_template_normal = ChatPromptTemplate.from_template(
 
 Dựa **chỉ trên phần CONTEXT dưới đây**, hãy **trích nguyên văn quy định pháp luật** có liên quan để trả lời câu hỏi.
 - Nếu trong phần CONTEXT có các câu đánh số (1, 2, 3...) hoặc a),b),c),...hãy trình bày xuống dòng rõ ràng.
+Bắt buộc **chỉ trả lời bằng tiếng việt **.
+Nghiêm cấm **không được suy luận, diễn giải, bịa đặt, cấm thêm icon **.
 
-Tuyệt đối **không được suy luận, diễn giải, hoặc paraphrase**.
-
-- Nếu không có nội dung nào trong CONTEXT trùng khớp hoặc trích dẫn nguyên văn điều luật, **dù có các câu tương tự hoặc diễn giải**, thì phải trả đúng duy nhất:
-  "Không tìm thấy quy định liên quan trong CONTEXT."
 
 - Nếu có nhiều đoạn giống nhau hoặc trùng lặp, chỉ giữ lại **một bản đầy đủ nhất**.
 
@@ -185,7 +191,6 @@ Tuyệt đối **không được suy luận, diễn giải, hoặc paraphrase**.
 ✍️ TRẢ LỜI (trích nguyên văn quy định hoặc câu thông báo trên):
 """
 )
-
 
 prompt_template_quiz = ChatPromptTemplate.from_template(
     """Bạn là trợ lý pháp lý chuyên về **Luật Dược Việt Nam**.
@@ -215,12 +220,18 @@ Không được:
 
 print("✅ All components initialized.\n")
 
+
 # ============= RAG QUERY =============
 def rag_query(question: str, use_llm: bool = True):
     if not vectordb or not llm:
-        return "⚠️ RAG chưa được khởi tạo đúng cách.", ""
+        return "⚠️ RAG chưa được khởi tạo đúng cách.", "", "N/A"
 
-    # === 1️⃣ Nếu câu hỏi có chứa 'Điều X' → chỉ truy xuất dữ liệu, không gọi LLM ===
+    final_context = ""
+    source_info = ""
+    metrics_str = ""
+    q_vec = None  # Sẽ dùng để tính toán
+
+    # === 1️⃣ Nếu câu hỏi có chứa 'Điều X' → chỉ truy xuất dữ liệu ===
     match = re.search(r"Điều\s*(\d+)", question.strip(), re.IGNORECASE)
     if match:
         article_num = match.group(1).strip()
@@ -234,71 +245,88 @@ def rag_query(question: str, use_llm: bool = True):
                 found_docs.append(f"{art}\n{doc.strip()}")
 
         if not found_docs:
-            return "Không tìm thấy thông tin này trong các điều luật.", f"Điều {article_num} (không thấy trong DB)"
+            return "Không tìm thấy thông tin này trong các điều luật.", f"Điều {article_num} (không thấy trong DB)", "N/A"
 
-        context = "\n---\n".join(found_docs)
+        final_context = "\n---\n".join(found_docs)
+        source_info = f"Điều {article_num} (tìm thấy {len(found_docs)} đoạn)"
 
         # 🚫 Tự động bỏ qua LLM nếu câu hỏi chỉ dạng 'Điều X' hoặc tương tự
         if re.fullmatch(r".*Điều\s*\d+.*", question.strip(), re.IGNORECASE):
-            return context, f"Điều {article_num} (tìm thấy {len(found_docs)} đoạn)"
+            use_llm = False
 
-        # Nếu câu hỏi dài hoặc có thêm nội dung → vẫn có thể gọi LLM
-        if not use_llm:
-            return context, f"Điều {article_num} (tìm thấy {len(found_docs)} đoạn)"
+            # Nếu câu hỏi dài hoặc có thêm nội dung (ví dụ: "Điều 47 nói gì về...")
+        # thì vẫn cho phép `use_llm` (nếu user bật)
 
-        question = f"Nội dung quy định tại Điều {article_num} là gì?"
+    # === 2️⃣ Hybrid Search (BM25 + Embedding) (Nếu không phải tìm theo 'Điều X') ===
+    else:
+        all_data = vectordb._collection.get(include=["documents", "metadatas"], limit=10000)
+        documents = all_data.get("documents", [])
+        metadatas = all_data.get("metadatas", [])
+        if not documents:
+            return "⚠️ CSDL trống hoặc chưa tải đúng.", "", "N/A"
 
-    # === 2️⃣ Hybrid Search (BM25 + Embedding) ===
-    all_data = vectordb._collection.get(include=["documents", "metadatas"], limit=10000)
-    documents = all_data.get("documents", [])
-    metadatas = all_data.get("metadatas", [])
-    if not documents:
-        return "⚠️ CSDL trống hoặc chưa tải đúng.", ""
+        tokenized_docs = [doc.lower().split() for doc in documents]
+        bm25 = BM25Okapi(tokenized_docs)
+        bm25_scores = bm25.get_scores(question.lower().split())
+        top_bm25_idx = np.argsort(bm25_scores)[::-1][:TOP_K]
+        bm25_docs = [(bm25_scores[i], documents[i], metadatas[i]) for i in top_bm25_idx if bm25_scores[i] > 0]
 
-    tokenized_docs = [doc.lower().split() for doc in documents]
-    bm25 = BM25Okapi(tokenized_docs)
-    bm25_scores = bm25.get_scores(question.lower().split())
-    top_bm25_idx = np.argsort(bm25_scores)[::-1][:TOP_K]
-    bm25_docs = [(bm25_scores[i], documents[i], metadatas[i]) for i in top_bm25_idx if bm25_scores[i] > 0]
+        sem_docs = retriever.invoke(question)
+        merged, seen = [], set()
 
-    sem_docs = retriever.invoke(question)
-    merged, seen = [], set()
+        for score, doc, meta in bm25_docs:
+            art = meta.get("article", "Không rõ") if isinstance(meta, dict) else "Không rõ"
+            if doc not in seen:
+                merged.append((float(score), doc, art))
+                seen.add(doc)
 
-    for score, doc, meta in bm25_docs:
-        art = meta.get("article", "Không rõ") if isinstance(meta, dict) else "Không rõ"
-        if doc not in seen:
-            merged.append((float(score), doc, art))
-            seen.add(doc)
+        q_vec = embed_query_vector(question, embed_tokenizer, embed_model)
+        for d in sem_docs:
+            d_vec = embed_query_vector(d.page_content, embed_tokenizer, embed_model)
+            cos_sim = cosine_similarity(q_vec, d_vec)
+            art = d.metadata.get("article", "Không rõ")
+            if d.page_content not in seen and cos_sim >= THRESHOLD:
+                merged.append((float(cos_sim), d.page_content, art))
+                seen.add(d.page_content)
 
-    q_vec = embed_query_vector(question, embed_tokenizer, embed_model)
-    for d in sem_docs:
-        d_vec = embed_query_vector(d.page_content, embed_tokenizer, embed_model)
-        cos_sim = cosine_similarity(q_vec, d_vec)
-        art = d.metadata.get("article", "Không rõ")
-        if d.page_content not in seen and cos_sim >= THRESHOLD:
-            merged.append((float(cos_sim), d.page_content, art))
-            seen.add(d.page_content)
+        if not merged:
+            return "⚠️ Không tìm thấy điều luật liên quan.", "", "N/A"
 
-    if not merged:
-        return "⚠️ Không tìm thấy điều luật liên quan.", ""
+        merged.sort(key=lambda x: x[0], reverse=True)
+        best_score, _, best_art = merged[0]
+        same_articles = [doc for score, doc, art in merged if art == best_art]
+        final_context = f"{best_art}\n" + "\n".join(same_articles).strip()
+        source_info = f"{best_art} (score={best_score:.2f})"
 
-    merged.sort(key=lambda x: x[0], reverse=True)
-    best_score, _, best_art = merged[0]
-    same_articles = [doc for score, doc, art in merged if art == best_art]
-    context = f"{best_art}\n" + "\n".join(same_articles).strip()
+    # === 3️⃣ Rút gọn Context và Tính Metrics cơ bản ===
+    if len(final_context.split()) > 4000:
+        final_context = " ".join(final_context.split()[:4000])
 
-    if len(context.split()) > 4000:
-        context = " ".join(context.split()[:4000])
+    try:
+        # Tính vector cho câu hỏi (nếu chưa có) và ngữ cảnh
+        if q_vec is None:
+            q_vec = embed_query_vector(question, embed_tokenizer, embed_model)
+        c_vec = embed_query_vector(final_context, embed_tokenizer, embed_model)
 
-    # Nếu không muốn gọi LLM thì trả lại luôn context
+        # METRIC 1: Context Relevance
+        context_relevance = cosine_similarity(q_vec, c_vec)
+        metrics_str = f"🔹 Context Relevance (Hỏi vs Ngữ cảnh): {context_relevance:.4f}\n"
+    except Exception as e:
+        metrics_str = f"Lỗi tính metric Context: {e}\n"
+        c_vec = None  # Đảm bảo c_vec tồn tại
+
+    # === 4️⃣ Xử lý nếu KHÔNG gọi LLM ===
     if not use_llm:
-        return context, f"{best_art} (score={best_score:.2f})"
+        metrics_str += "🔹 Groundedness (Trả lời vs Ngữ cảnh): N/A (LLM Bypassed)\n"
+        metrics_str += "🔹 Answer Relevance (Trả lời vs Hỏi): N/A (LLM Bypassed)"
+        # Trả về chính ngữ cảnh làm câu trả lời
+        return final_context, source_info, metrics_str
 
-    # === 3️⃣ Gọi LLM nếu cần ===
+    # === 5️⃣ Gọi LLM nếu cần ===
     prompt_text = (
-        prompt_template_quiz.format(context=context, question=question)
+        prompt_template_quiz.format(context=final_context, question=question)
         if re.search(r"\b[a-e]\)", question.lower())
-        else prompt_template_normal.format(context=context, question=question)
+        else prompt_template_normal.format(context=final_context, question=question)
     )
 
     try:
@@ -307,12 +335,31 @@ def rag_query(question: str, use_llm: bool = True):
 
         lines = [line.strip() for line in answer.splitlines() if line.strip()]
         unique_lines = remove_near_duplicates(lines, similarity=0.9)
-        answer = " ".join(unique_lines)
+        answer = "\n".join(unique_lines)
+
+        # --- TÍNH METRICS CHO CÂU TRẢ LỜI ---
+        try:
+            if c_vec is not None and q_vec is not None:
+                a_vec = embed_query_vector(answer, embed_tokenizer, embed_model)
+
+                # METRIC 2: Groundedness
+                groundedness = cosine_similarity(a_vec, c_vec)
+                metrics_str += f"🔹 Groundedness (Trả lời vs Ngữ cảnh): {groundedness:.4f}\n"
+
+                # METRIC 3: Answer Relevance
+                answer_relevance = cosine_similarity(a_vec, q_vec)
+                metrics_str += f"🔹 Answer Relevance (Trả lời vs Hỏi): {answer_relevance:.4f}"
+            else:
+                metrics_str += "Không thể tính metrics (lỗi vector c_vec/q_vec)"
+        except Exception as e:
+            metrics_str += f"Lỗi tính metric Trả lời: {e}"
+        # --- KẾT THÚC TÍNH METRICS ---
 
     except Exception as e:
         answer = f"Lỗi khi sinh câu trả lời: {e}"
+        metrics_str += "Lỗi sinh câu trả lời, không thể tính metrics."
 
-    return answer, f"{best_art} (score={best_score:.2f})"
+    return answer, source_info, metrics_str
 
 
 # ======= Gradio UI =======
@@ -338,10 +385,13 @@ with gr.Blocks(title="⚖️ Trợ lý pháp lý Luật Dược Việt Nam (Llam
             clear = gr.Button("Xoá")
         with gr.Column(scale=3):
             answer_box = gr.Textbox(label="Trả lời", lines=10, interactive=False)
-            source_box = gr.Textbox(label="Điều luật trích dẫn", lines=6, interactive=False)
+            source_box = gr.Textbox(label="Điều luật trích dẫn", lines=3, interactive=False)
+            # THÊM HỘP HIỂN THỊ METRICS
+            metrics_box = gr.Textbox(label="📊 Metrics Đánh giá (Tương đồng Cosine)", lines=4, interactive=False)
 
-    ask.click(fn=rag_query, inputs=[question, use_llm], outputs=[answer_box, source_box])
-    clear.click(lambda: ("", "", ""), outputs=[question, answer_box, source_box])
+    # CẬP NHẬT ĐẦU RA CHO NÚT "Hỏi" VÀ "Xoá"
+    ask.click(fn=rag_query, inputs=[question, use_llm], outputs=[answer_box, source_box, metrics_box])
+    clear.click(lambda: ("", "", "", ""), outputs=[question, answer_box, source_box, metrics_box])
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860)
