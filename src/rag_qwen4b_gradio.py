@@ -22,14 +22,13 @@ from rank_bm25 import BM25Okapi
 BASE_DIR = "/home/quang/Documents/ChatBot"
 CHROMA_PATH = os.path.join(BASE_DIR, "data", "chroma_db_qwen_embed_vn")
 LLM_MODEL = "meta-llama/Llama-3.2-1B"  # model base đúng của LoRA fine-tuned
-EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"  # vẫn có thể dùng Qwen3 embed
+EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TOP_K = 20
 THRESHOLD = 0.005
 BATCH_SIZE = 4
 
 import difflib
-
 
 def remove_near_duplicates(lines, similarity=0.9):
     cleaned = []
@@ -42,7 +41,7 @@ def remove_near_duplicates(lines, similarity=0.9):
             sim = difflib.SequenceMatcher(None, existing_line, line).ratio()
             if sim >= similarity:
                 is_duplicate = True
-                break # Dòng này lặp, bỏ qua
+                break
 
         if not is_duplicate:
             cleaned.append(line)
@@ -104,10 +103,10 @@ embedding_fn = None
 def initialize_rag_components():
     global vectordb, retriever, llm, prompt_template, embed_model, embed_tokenizer, embedding_fn
 
-    print("🛠️ Initializing RAG components...")
+    print(" Initializing RAG components...")
 
     # 1️⃣ Load embedding model
-    print(f"🔹 Loading embedding model: {EMBED_MODEL}")
+    print(f" Loading embedding model: {EMBED_MODEL}")
     embed_tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL)
     embed_model = AutoModel.from_pretrained(
         EMBED_MODEL,
@@ -119,15 +118,15 @@ def initialize_rag_components():
     except Exception:
         pass
     embedding_fn = Qwen3Embedding(embed_model, embed_tokenizer, DEVICE, BATCH_SIZE)
-    print("✅ Embedding model ready.")
+    print("Embedding model ready.")
 
     # 2️⃣ Load Chroma DB
     if not os.path.exists(CHROMA_PATH):
-        raise FileNotFoundError(f"❌ Chroma DB not found at {CHROMA_PATH}")
+        raise FileNotFoundError(f" Chroma DB not found at {CHROMA_PATH}")
     print(f"🔹 Loading Chroma DB from {CHROMA_PATH}")
     vectordb = Chroma(persist_directory=CHROMA_PATH, embedding_function=embedding_fn)
     retriever = vectordb.as_retriever(search_kwargs={"k": TOP_K})
-    print("✅ Chroma retriever ready.")
+    print(" Chroma retriever ready.")
 
     # 3️⃣ Load LLM (base Llama + LoRA)
     print(f"🔹 Loading base LLM: {LLM_MODEL} (4-bit)...")
@@ -151,13 +150,13 @@ def initialize_rag_components():
     if os.path.exists(lora_path):
         try:
             from peft import PeftModel
-            print(f"🔹 Attaching LoRA adapter from {lora_path}")
+            print(f"Attaching LoRA adapter from {lora_path}")
             model_llm = PeftModel.from_pretrained(model_llm, lora_path)
-            print("✅ LoRA adapter loaded successfully!")
+            print("LoRA adapter loaded successfully!")
         except Exception as e:
-            print(f"⚠️ Warning: Không thể load LoRA adapter: {e}")
+            print(f"Warning: Không thể load LoRA adapter: {e}")
     else:
-        print(f"⚠️ Không tìm thấy thư mục LoRA tại {lora_path}")
+        print(f"Không tìm thấy thư mục LoRA tại {lora_path}")
 
     llm = pipeline(
         "text-generation",
@@ -167,7 +166,7 @@ def initialize_rag_components():
         no_repeat_ngram_size=6
     )
 
-    print("✅ LLM ready.")
+    print("LLM ready.")
 
 
 prompt_template_normal = ChatPromptTemplate.from_template(
@@ -176,10 +175,12 @@ prompt_template_normal = ChatPromptTemplate.from_template(
 Dựa **chỉ trên phần CONTEXT dưới đây**, hãy **trích nguyên văn quy định pháp luật** có liên quan để trả lời câu hỏi.
 - Nếu trong phần CONTEXT có các câu đánh số (1, 2, 3...) hoặc a),b),c),...hãy trình bày xuống dòng rõ ràng.
 Bắt buộc **chỉ trả lời bằng tiếng việt **.
-Nghiêm cấm **không được suy luận, diễn giải, bịa đặt, cấm thêm icon **.
-
-
 - Nếu có nhiều đoạn giống nhau hoặc trùng lặp, chỉ giữ lại **một bản đầy đủ nhất**.
+Nghiêm cấm **không được suy luận, diễn giải, bịa đặt, cấm thêm icon **.
+**Nếu câu hỏi có liên quan nhưng CONTEXT không chứa thông tin cần thiết → trả lời:"Không tìm thấy thông tin này trong các điều luật."**
+
+**Nếu câu hỏi hoàn toàn không liên quan đến CONTEXT → trả lời bằng tiếng Việt rằng:"Câu hỏi không thuộc phạm vi thông tin trong tài liệu."**
+
 
 ---
 📑 CONTEXT:
@@ -200,7 +201,11 @@ Dựa **chỉ trên phần CONTEXT**, hãy:
 - trích nguyên văn quy định liên quan,
 - không thêm giải thích hay bình luận.
 - Nếu trong phần CONTEXT có các câu đánh số (1, 2, 3...) hoặc a),b),c),...hãy trình bày xuống dòng rõ ràng.
+Nếu câu hỏi có liên quan nhưng CONTEXT không chứa thông tin cần thiết → trả lời:
+   "Không tìm thấy thông tin này trong các điều luật."
 
+Nếu câu hỏi hoàn toàn không liên quan đến CONTEXT → trả lời bằng tiếng Việt rằng
+   "Câu hỏi không thuộc phạm vi thông tin trong tài liệu."
 
 Không được:
 - Tự tạo nội dung, URL, hay số liệu.
@@ -218,13 +223,13 @@ Không được:
 """
 )
 
-print("✅ All components initialized.\n")
+print(" All components initialized.\n")
 
 
 # ============= RAG QUERY =============
 def rag_query(question: str, use_llm: bool = True):
     if not vectordb or not llm:
-        return "⚠️ RAG chưa được khởi tạo đúng cách.", "", "N/A"
+        return "RAG chưa được khởi tạo đúng cách.", "", "N/A"
 
     final_context = ""
     source_info = ""
@@ -250,7 +255,7 @@ def rag_query(question: str, use_llm: bool = True):
         final_context = "\n---\n".join(found_docs)
         source_info = f"Điều {article_num} (tìm thấy {len(found_docs)} đoạn)"
 
-        # 🚫 Tự động bỏ qua LLM nếu câu hỏi chỉ dạng 'Điều X' hoặc tương tự
+        #  Tự động bỏ qua LLM nếu câu hỏi chỉ dạng 'Điều X' hoặc tương tự
         if re.fullmatch(r".*Điều\s*\d+.*", question.strip(), re.IGNORECASE):
             use_llm = False
 
@@ -263,7 +268,7 @@ def rag_query(question: str, use_llm: bool = True):
         documents = all_data.get("documents", [])
         metadatas = all_data.get("metadatas", [])
         if not documents:
-            return "⚠️ CSDL trống hoặc chưa tải đúng.", "", "N/A"
+            return "⚠ CSDL trống hoặc chưa tải đúng.", "", "N/A"
 
         tokenized_docs = [doc.lower().split() for doc in documents]
         bm25 = BM25Okapi(tokenized_docs)
@@ -290,7 +295,7 @@ def rag_query(question: str, use_llm: bool = True):
                 seen.add(d.page_content)
 
         if not merged:
-            return "⚠️ Không tìm thấy điều luật liên quan.", "", "N/A"
+            return " Không tìm thấy điều luật liên quan.", "", "N/A"
 
         merged.sort(key=lambda x: x[0], reverse=True)
         best_score, _, best_art = merged[0]
@@ -366,7 +371,7 @@ def rag_query(question: str, use_llm: bool = True):
 try:
     initialize_rag_components()
 except Exception as e:
-    print(f"❌ LỖI KHỞI TẠO NGHIÊM TRỌNG: {e}")
+    print(f"LỖI KHỞI TẠO NGHIÊM TRỌNG: {e}")
 
 with gr.Blocks(title="⚖️ Trợ lý pháp lý Luật Dược Việt Nam (Llama 1B LoRA)") as demo:
     gr.Markdown(f"""

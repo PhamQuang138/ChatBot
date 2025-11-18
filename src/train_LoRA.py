@@ -17,7 +17,7 @@ OUTPUT_DIR = "./lora_llama3_4bit"
 
 torch.cuda.empty_cache()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"🚀 Using device: {device}")
+print(f" Using device: {device}")
 
 # 1️⃣ Load tokenizer
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -49,7 +49,7 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
 )
 
-# ⚙️ Chuẩn bị model cho k-bit training
+#  Chuẩn bị model cho k-bit training
 model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
 
 # 3️⃣ Load dataset
@@ -68,7 +68,7 @@ def format_conversation(example):
     text = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
-        add_generation_prompt=True  # ⚠️ PHẢI là True để có phần <|start_header_id|>assistant... cuối
+        add_generation_prompt=True
     )
     example["text"] = text
     return example
@@ -90,9 +90,6 @@ def tokenize(example):
     start_assistant = tokenizer.convert_tokens_to_ids("<|start_header_id|>")
     assistant_tag = tokenizer.convert_tokens_to_ids("<|end_header_id|>")
 
-    # mask đơn giản hơn: bỏ toàn bộ <user> cho đến hết
-    # vì Llama 3 template có <|start_header_id|>assistant<|end_header_id|>
-    # ta sẽ chỉ giữ lại phần sau token đó
     if "<|start_header_id|>assistant<|end_header_id|>" in example["text"]:
         start_idx = example["text"].find("<|start_header_id|>assistant<|end_header_id|>")
         mask_text = example["text"][:start_idx]
@@ -147,7 +144,7 @@ class PrintLossWithTimeCallback(TrainerCallback):
             elapsed = time.time() - self.start_time
             h, rem = divmod(elapsed, 3600)
             m, s = divmod(rem, 60)
-            print(f" Step {state.global_step:5d} | Loss: {logs['loss']:.4f} | ⏱️ {int(h):02d}:{int(m):02d}:{int(s):02d}")
+            print(f" Step {state.global_step:5d} | Loss: {logs['loss']:.4f} |  {int(h):02d}:{int(m):02d}:{int(s):02d}")
 
 # 9️⃣ Train
 trainer = Trainer(
@@ -160,4 +157,4 @@ trainer = Trainer(
 
 trainer.train()
 model.save_pretrained(OUTPUT_DIR)
-print(f"✅ Train hoàn tất! Đã lưu LoRA tại: {OUTPUT_DIR}")
+print(f" Train hoàn tất! Đã lưu LoRA tại: {OUTPUT_DIR}")
