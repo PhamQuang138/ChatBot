@@ -26,7 +26,7 @@ Vector Database: ChromaDB.
 Interface: Gradio.
 
 📋 Yêu cầu hệ thống (Prerequisites)
-Hệ điều hành: Linux (Ubuntu) hoặc Windows (WSL2 được khuyến nghị).
+Hệ điều hành: Linux (Ubuntu) hoặc Windows.
 
 Python: Phiên bản 3.10 trở lên.
 
@@ -46,8 +46,8 @@ Tải mã nguồn về máy của bạn:
 
 Bash
 
-git clone https://github.com/username/legal-chatbot-rag.git
-cd legal-chatbot-rag
+git clone https://github.com/PhamQuang138/ChatBot
+
 Bước 2: Tạo môi trường ảo (Virtual Environment)
 Sử dụng venv để tạo môi trường độc lập, tránh xung đột thư viện:
 
@@ -82,22 +82,31 @@ Chạy lệnh sau để cài đặt tất cả các thư viện cần thiết t�
 Bash
 
 pip install --upgrade pip
+
 pip install -r requirements.txt
+
 (Lưu ý: Nếu bạn dùng GPU NVIDIA, hãy đảm bảo đã cài đặt PyTorch bản hỗ trợ CUDA tương thích).
 
 📂 Cấu trúc dữ liệu
 Đảm bảo bạn đã đặt dữ liệu và model vào đúng thư mục trước khi chạy:
 
 Plaintext
+Chatbot/
 
-legal-chatbot-rag/
 ├── data/
-│   └── chroma_db_qwen_embed_vn/  # Thư mục chứa Vector Database
+  
+│  └── chroma_db_qwen_embed_vn/  # Thư mục chứa Vector Database
+
 ├── src/
-│   └── lora_llama3_4bit/         # Thư mục chứa Adapter LoRA (nếu có)
+
+│  └── lora_llama3_4bit/         # Thư mục chứa Adapter LoRA (nếu có)
+
 ├── rag_qwen4b_gradio.py          # File code chính
+
 ├── requirements.txt              # Danh sách thư viện
+
 └── README.md
+
 Lưu ý: Trong file rag_qwen4b_gradio.py, hãy kiểm tra biến BASE_DIR để đảm bảo đường dẫn trỏ đúng tới thư mục dự án của bạn.
 
 ▶️ Hướng dẫn Sử dụng
@@ -117,8 +126,10 @@ Tick chọn "Gọi LLM" nếu muốn Chatbot trả lời chi tiết.
 Bỏ chọn "Gọi LLM" nếu chỉ muốn tìm kiếm văn bản gốc nhanh chóng.
 
 📊 Giải thích các chỉ số đánh giá (Metrics)
+
 Context Relevance: Đo độ liên quan giữa Câu hỏi và Văn bản luật tìm được.
 
 Groundedness: Đo độ trung thực, xem Câu trả lời của AI có bám sát Văn bản luật không (chống bịa đặt).
 
 Answer Relevance: Đo xem Câu trả lời có đi đúng trọng tâm Câu hỏi không.
+
