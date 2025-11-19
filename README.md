@@ -1,4 +1,4 @@
-CHÚ Ý: ĐỂ SỬ DỤNG CẦN LẤY ACCESS TOKEN CỦA LLAMA 3.2 1B và phiên bản Pytorch cho CPU (nếu không dùng ubuntu)
+CHÚ Ý: ĐỂ SỬ DỤNG CẦN LẤY ACCESS TOKEN CỦA LLAMA 3.2 1B và chú ý cài các phiên bản thư viện phù hợp cho Windows (nếu không dùng ubuntu)
 
 ⚖️ Trợ lý Pháp lý Luật Dược Việt Nam (RAG Chatbot)
 Hệ thống Chatbot hỗ trợ tra cứu và hỏi đáp về Luật Dược Việt Nam, được xây dựng dựa trên kiến trúc RAG (Retrieval-Augmented Generation). Hệ thống kết hợp khả năng tìm kiếm ngữ nghĩa (Semantic Search) và tìm kiếm từ khóa (Keyword Search) để đưa ra câu trả lời chính xác, có trích dẫn nguồn cụ thể.
@@ -134,6 +134,7 @@ Context Relevance: Đo độ liên quan giữa Câu hỏi và Văn bản luật 
 Groundedness: Đo độ trung thực, xem Câu trả lời của AI có bám sát Văn bản luật không (chống bịa đặt).
 
 Answer Relevance: Đo xem Câu trả lời có đi đúng trọng tâm Câu hỏi không.
+
 
 
 
